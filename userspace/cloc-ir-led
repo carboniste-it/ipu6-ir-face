@@ -1,0 +1,32 @@
+#!/usr/bin/python3 -I
+# LM3643 IR illuminator control (I2C 0x63 on the camera module bus). Usage: cloc-ir-led on|off|status
+# "on" = torch mode, both LEDs, code 0x3F (~89 mA continuous). The vendor Windows driver pulses the same
+# LEDs in flash mode at code 0x1E (~360 mA); this is a lower, bounded setting used only while the
+# on-demand IR relay runs (<= 12 s). "off" = standby.
+import fcntl, os, sys
+import shlex
+CFG = {"IR_TOOLS": "/usr/bin", "IR_SENSOR_ACPI": "OVTI9234", "IR_LED_ACPI": "INT347D", "IR_LED_I2C_ADDR": "0x63", "IR_LED_TORCH_CODE": "0x3F",
+       "IR_CSI_ENTITY": "Intel IPU6 CSI2 0", "IR_CAPTURE_ENTITY": "Intel IPU6 ISYS Capture 0", "IR_FORMAT": "Y10_1X10/644x364",
+       "IR_LOOPBACK": "/dev/video43", "RGB_LOOPBACK": "/dev/video42"}
+try:
+    for line in open("/etc/ir-face.conf"):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1); CFG[k.strip()] = " ".join(shlex.split(v))
+except OSError: pass
+TORCH_CODE = int(CFG["IR_LED_TORCH_CODE"], 16); ADDR = int(CFG["IR_LED_I2C_ADDR"], 16); ACPI = CFG["IR_LED_ACPI"]
+def bus():
+    p = os.path.realpath(f"/sys/bus/i2c/devices/i2c-{ACPI}:00")
+    for part in p.split("/"):
+        if part.startswith("i2c-") and part[4:].isdigit(): return "/dev/" + part
+    raise SystemExit(f"{ACPI} bus not found")
+fd = os.open(bus(), os.O_RDWR); fcntl.ioctl(fd, 0x0703, ADDR)
+def wr(r, v): os.write(fd, bytes([r, v]))
+def rd(r): os.write(fd, bytes([r])); return os.read(fd, 1)[0]
+cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+if rd(0x0C) != 0x02: raise SystemExit("not an LM3643")
+if cmd == "on":
+    wr(0x05, 0x80 | TORCH_CODE); wr(0x06, 0x80 | TORCH_CODE); wr(0x01, 0x80 | 0x08 | 0x03)
+elif cmd == "off":
+    wr(0x01, 0x80)
+print(f"enable={rd(0x01):#04x} torch1={rd(0x05):#04x} torch2={rd(0x06):#04x} flags1={rd(0x0A):#04x} flags2={rd(0x0B):#04x}")

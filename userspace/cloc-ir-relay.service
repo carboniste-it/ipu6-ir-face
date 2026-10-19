@@ -1,0 +1,12 @@
+[Unit]
+Description=Intel IR camera (OV9234) relay to loopback node, on demand for face login
+# Started by PAM (cloc-ir-prepare) right before Howdy runs; expires by itself so the RGB camera HAL
+# (which resets all media links when it starts) never finds the IR link busy for long.
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/cloc-ir-relay
+ExecStopPost=-/usr/local/libexec/cloc-ir-after
+RuntimeMaxSec=12
+Restart=no
+Nice=-5

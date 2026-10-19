@@ -1,0 +1,14 @@
+[Unit]
+Description=cloc IR face authentication service (OV9234 + LM3643 liveness)
+After=v4l2-relayd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/cloc-face-authd
+Restart=on-failure
+RestartSec=2
+Nice=-5
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

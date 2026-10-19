@@ -1,0 +1,24 @@
+#!/usr/bin/python3 -I
+# PAM client (pam_exec): asks cloc-face-authd to authenticate PAM_USER with the IR camera.
+# Exit 0 only on "OK". Skips remote sessions and closed lids. Usage for root: --enroll USER LABEL.
+import os, sys, socket
+def ask(line, timeout=6.0):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(timeout)
+    s.connect("/run/cloc-face-auth.sock"); s.sendall(line.encode() + b"\n")
+    r = s.recv(256).decode().strip(); s.close(); return r
+try:
+    if len(sys.argv) >= 3 and sys.argv[1] == "--enroll":
+        r = ask(f"ENROLL {sys.argv[2]} {' '.join(sys.argv[3:]) or 'cloc IR'}", 8.0); print(r); sys.exit(0 if r.startswith("OK") else 1)
+    user = os.environ.get("PAM_USER", "")
+    if not user or os.environ.get("PAM_TYPE", "auth") != "auth" or os.environ.get("PAM_RHOST"): sys.exit(1)
+    try:
+        penv = open(f"/proc/{os.getppid()}/environ", "rb").read()
+        if b"SSH_CONNECTION=" in penv or b"SSH_TTY=" in penv: sys.exit(1)
+    except OSError: pass
+    try:
+        for f in os.listdir("/proc/acpi/button/lid"):
+            if "closed" in open(f"/proc/acpi/button/lid/{f}/state").read(): sys.exit(1)
+    except OSError: pass
+    sys.exit(0 if ask(f"AUTH {user}").startswith("OK") else 1)
+except Exception:
+    sys.exit(1)

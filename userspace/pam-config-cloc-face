@@ -1,0 +1,6 @@
+Name: cloc IR face login (liveness + recognition, falls through to fingerprint/password)
+Default: yes
+Priority: 520
+Auth-Type: Primary
+Auth:
+	[success=end default=ignore]	pam_exec.so quiet /usr/local/libexec/cloc-face-auth-client

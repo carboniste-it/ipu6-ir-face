@@ -1,0 +1,51 @@
+From: ipu6-ir-face <it@carboniste.com>
+Subject: [PATCH 1/2] media: ipu6: isys: program a 1-lane sensor on MCD PHY port B with the port-B 2-lane set
+
+On the Lenovo ThinkPad X1 Carbon Gen 11 (Raptor Lake, IPU6EP) the IR
+camera (OmniVision OV9234, ACPI OVTI9234) is a single-lane CSI-2 sensor on
+driver port 0, which ipu6_isys_driver_port_to_phy_port() maps to MCD PHY
+port B (phy_port 1). With x1_port1_config_regs the receiver accepts the
+stream (FW OPEN/START ack, PHY ready, CSI-2 error accumulator stays zero)
+but never produces a frame: every capture ends in a DQBUF timeout and a
+"stream stop time out".
+
+The vendor Windows IPU6 driver (iacamera64.sys) carries the same PHY
+register tables. It has no 1-lane table for port B at all; a 1-lane sensor
+on port B is programmed with the 2-lane port-B PPI set (PPI3/4/5). It also
+never writes 0x5d060100 to the PPI4 0x0aa8 register - that value only
+appears in the Linux x1_port1_config_regs table and differs from every
+other data-lane entry (all end in ...01010a).
+
+Use x2_port1_config_regs for 1-lane sensors on PHY port B. With this
+change the OV9234 streams Y10 644x364 at 30 fps and coexists with the
+2-lane OV2740 on port 1 (PHY port A).
+
+Tested on Linux 6.14 and 7.0 (Ubuntu HWE) with an out-of-tree OV9234
+driver; the x1 tables for ports A, C and D are untouched.
+
+---
+--- a/drivers/media/pci/intel/ipu6/ipu6-isys-mcd-phy.c
++++ b/drivers/media/pci/intel/ipu6/ipu6-isys-mcd-phy.c
+@@ -126,6 +126,7 @@
+ 	{0x00001944, 0xfa4401e2}
+ };
+ 
++static const struct phy_reg x2_port1_config_regs[];
+ static const struct phy_reg x1_port0_config_regs[] = {
+ 	{0x00000694, 0xc80060fa},
+ 	{0x00000680, 0x3d4f78ea},
+@@ -475,7 +476,13 @@
+ 
+ static const struct phy_reg *x1_config_regs[4] = {
+ 	x1_port0_config_regs,
+-	x1_port1_config_regs,
++	/*
++	 * cloc 2026-10-17: a 1-lane sensor on PHY port B (driver CSI port 0)
++	 * never produced frames with x1_port1_config_regs. The Intel Windows
++	 * IPU6 driver carries no 1-lane port-B table and programs the 2-lane
++	 * port-B set; doing the same here makes the OV9234 IR sensor stream.
++	 */
++	x2_port1_config_regs,
+ 	x1_port2_config_regs,
+ 	x1_port3_config_regs
+ };

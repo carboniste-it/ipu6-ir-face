@@ -1,0 +1,147 @@
+#!/usr/bin/python3 -I
+# cloc-face-authd: root service behind /run/cloc-face-auth.sock; one-process IR face login for the X1C11 (OV9234 + LM3643), used as a PAM module via
+#   auth [success=end default=ignore] pam_exec.so quiet /usr/local/libexec/cloc-face-auth
+# Reads raw Y10 frames directly from the IPU6 capture node, recognises the user against Howdy's models
+# (same dlib models, same distance metric/certainty), then proves liveness by blinking the IR emitter:
+# the matched face must brighten strongly with the emitter, stand out from the background and show
+# 3-D shading. Exit 0 = authenticated; anything else = fall through to fingerprint/password.
+import os, sys, time, json, threading, subprocess, configparser
+import numpy as np
+import shlex
+CFG = {"IR_TOOLS": "/usr/bin", "IR_SENSOR_ACPI": "OVTI9234", "IR_LED_ACPI": "INT347D", "IR_LED_I2C_ADDR": "0x63", "IR_LED_TORCH_CODE": "0x3F",
+       "IR_CSI_ENTITY": "Intel IPU6 CSI2 0", "IR_CAPTURE_ENTITY": "Intel IPU6 ISYS Capture 0", "IR_FORMAT": "Y10_1X10/644x364",
+       "IR_LOOPBACK": "/dev/video43", "RGB_LOOPBACK": "/dev/video42"}
+try:
+    for line in open("/etc/ir-face.conf"):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1); CFG[k.strip()] = " ".join(shlex.split(v))
+except OSError: pass
+TOOLS = CFG["IR_TOOLS"]
+LED = "/usr/local/libexec/cloc-ir-led"
+W, H, STRIDE = 644, 364, 1344
+FRAME = STRIDE * H
+DEADLINE = 4.0
+# Liveness on raw 10-bit values (linear): emitter on-minus-off on the face vs the background.
+LV_DFACE, LV_DRATIO, LV_RELSTD = 15.0, 1.8, 0.20   # provisional; calibrate with live + spoof data
+x = np.clip((np.arange(1024, dtype=np.float32) - 64.0) / 336.0, 0.0, 1.0)
+LUT = np.round(255.0 * x ** 0.6).astype(np.uint8)
+import socket, pwd, struct, cv2, dlib
+LIB = {"cv2": cv2, "clahe": cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)), "det": dlib.get_frontal_face_detector(),
+       "pose": dlib.shape_predictor("/usr/share/dlib/shape_predictor_5_face_landmarks.dat"),
+       "enc": dlib.face_recognition_model_v1("/usr/share/dlib/dlib_face_recognition_resnet_model_v1.dat")}
+def sh(*a): return subprocess.run(a, capture_output=True, text=True, timeout=5)
+
+def run(user, enroll=False, label="cloc IR"):
+    T0 = time.time(); info = {"user": user, "mode": "enroll" if enroll else "auth"}
+    def fin(ok, why):
+        info["result"] = why; info["ms"] = int((time.time() - T0) * 1000)
+        subprocess.run(["logger", "-t", "cloc-face-auth", json.dumps(info)]); return ok, why
+    cfg = configparser.ConfigParser(); cfg.read("/etc/howdy/config.ini")
+    certainty = cfg.getfloat("video", "certainty", fallback=3.5) / 10
+    model_path = f"/usr/share/dlib/{user}.dat"
+    try: models = json.load(open(model_path))
+    except (OSError, ValueError): models = []
+    if not enroll and not models: return fin(False, "no-model")
+    enc_db = np.array([e for m in models for e in m["data"]], dtype=np.float64) if models else None
+    if sh("systemctl", "is-active", "cloc-ir-relay").stdout.strip() == "active": sh("systemctl", "stop", "cloc-ir-relay")
+    sh(TOOLS + "/media-ctl", "-l", f'"{CFG["IR_CSI_ENTITY"]}":1 -> "{CFG["IR_CAPTURE_ENTITY"]}":0 [1]')
+    sensor = next((l.split(":", 1)[1].split("(")[0].strip() for l in sh(TOOLS + "/media-ctl", "-p").stdout.splitlines() if "entity" in l and "ov9234" in l.lower()), None)
+    if not sensor: return fin(False, "no-sensor")
+    sh(TOOLS + "/media-ctl", "-V", f'"{sensor}":0 [fmt:{CFG["IR_FORMAT"]} field:none]')
+    sh(TOOLS + "/media-ctl", "-V", f'"{CFG["IR_CSI_ENTITY"]}":0/0 [fmt:{CFG["IR_FORMAT"]} field:none]')
+    node = sh(TOOLS + "/media-ctl", "-e", CFG["IR_CAPTURE_ENTITY"]).stdout.strip()
+    sh(TOOLS + "/v4l2-ctl", "-d", node, "--set-fmt-video=width=644,height=364,pixelformat=Y10 ")
+    sh(LED, "on")
+    proc = subprocess.Popen([TOOLS + "/v4l2-ctl", "-d", node, "--stream-mmap=4", "--stream-count=300", "--stream-to=-"],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+    latest = {"seq": 0, "raw": None}; cond = threading.Condition()
+    def reader():
+        buf = bytearray(FRAME); mv = memoryview(buf)
+        while True:
+            got = 0
+            while got < FRAME:
+                n = proc.stdout.readinto(mv[got:])
+                if not n: return
+                got += n
+            a = (np.frombuffer(bytes(buf), dtype=np.uint16).reshape(H, STRIDE // 2)[:, :W] & 0x3FF)
+            with cond: latest["raw"] = a; latest["seq"] += 1; cond.notify_all()
+    threading.Thread(target=reader, daemon=True).start()
+    def frame_after(seq, timeout=1.0):
+        with cond:
+            cond.wait_for(lambda: latest["seq"] > seq, timeout)
+            return latest["seq"], latest["raw"]
+    try:
+        seq, raw = frame_after(0, 2.0)
+        if raw is None: return fin(False, "no-frames")
+        info["first_frame_ms"] = int((time.time() - T0) * 1000)
+        best = 9.0; tries = 0
+        while time.time() - T0 < DEADLINE:
+            seq, raw = frame_after(seq)
+            g = LIB["clahe"].apply(LUT[raw])
+            small = cv2.resize(g, (566, 320), interpolation=cv2.INTER_AREA)
+            faces = LIB["det"](small, 0) or LIB["det"](small, 1)
+            tries += 1
+            if not faces: continue
+            f = max(faces, key=lambda r: r.area())
+            rgb = cv2.cvtColor(small, cv2.COLOR_GRAY2RGB)
+            desc = np.array(LIB["enc"].compute_face_descriptor(rgb, LIB["pose"](rgb, f), 1))
+            if enroll:
+                models.append({"time": int(time.time()), "label": label[:24], "id": len(models), "data": [desc.tolist()]})
+                json.dump(models, open(model_path, "w")); os.chmod(model_path, 0o600)
+                info["enrolled_id"] = len(models) - 1; return fin(True, "enrolled")
+            dist = float(np.min(np.linalg.norm(enc_db - desc, axis=1))); best = min(best, dist)
+            if not (0 < dist < certainty): continue
+            info["match"] = round(dist * 10, 2); info["match_ms"] = int((time.time() - T0) * 1000)
+            s = 644 / 566.0
+            x0, y0, x1, y1 = [int(max(0, v * s)) for v in (f.left(), f.top(), f.right(), f.bottom())]
+            def settle(n):
+                nonlocal seq
+                for _ in range(n): seq, fr = frame_after(seq)
+                return fr.astype(np.float32)
+            sh(LED, "off"); off = settle(4)
+            sh(LED, "on");  on = settle(4)
+            d = on - off
+            mask = np.ones(d.shape, bool); mask[y0:y1, x0:x1] = False
+            dface = float(d[y0:y1, x0:x1].mean()); dbg = float(d[mask].mean())
+            relstd = float(d[y0:y1, x0:x1].std() / max(1.0, dface))
+            info.update(dface=round(dface, 1), dbg=round(dbg, 1), dratio=round(dface / max(1.0, dbg), 2), relstd=round(relstd, 2),
+                        face_on=round(float(on[y0:y1, x0:x1].mean()), 1), face_off=round(float(off[y0:y1, x0:x1].mean()), 1))
+            if dface >= LV_DFACE and dface / max(1.0, dbg) >= LV_DRATIO and relstd >= LV_RELSTD: return fin(True, "ok")
+            return fin(False, "liveness-fail")
+        info["best"] = round(best * 10, 2); info["frames"] = tries
+        return fin(False, "no-match" if best < 9 else "no-face")
+    finally:
+        try: proc.kill()
+        except Exception: pass
+        sh(LED, "off")
+        subprocess.Popen(["systemd-run", "--no-block", "--collect", "--quiet", "/usr/local/libexec/cloc-ir-after"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+SOCK = "/run/cloc-face-auth.sock"
+try: os.unlink(SOCK)
+except FileNotFoundError: pass
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); srv.bind(SOCK); os.chmod(SOCK, 0o666); srv.listen(4)
+busy = threading.Lock()
+while True:
+    c, _ = srv.accept()
+    try:
+        c.settimeout(2)
+        pid, uid, gid = struct.unpack("3i", c.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        parts = c.recv(256).decode(errors="replace").strip().split(" ", 2)
+        cmd, user = parts[0], (parts[1] if len(parts) > 1 else "")
+        try: target_uid = pwd.getpwnam(user).pw_uid
+        except KeyError: c.sendall(b"FAIL unknown-user\n"); continue
+        # A caller may only ask about itself; root (sudo, login, polkit agents run as root) may ask about anyone.
+        if uid != 0 and uid != target_uid: c.sendall(b"FAIL not-permitted\n"); continue
+        if cmd == "ENROLL" and uid != 0: c.sendall(b"FAIL root-only\n"); continue
+        if not busy.acquire(timeout=0.1): c.sendall(b"FAIL busy\n"); continue
+        try:
+            c.settimeout(None)
+            ok, why = run(user, enroll=(cmd == "ENROLL"), label=(parts[2] if len(parts) > 2 else "cloc IR"))
+        finally: busy.release()
+        c.sendall((("OK " if ok else "FAIL ") + why + "\n").encode())
+    except Exception as e:
+        try: c.sendall(f"FAIL error {str(e)[:60]}\n".encode())
+        except Exception: pass
+    finally: c.close()

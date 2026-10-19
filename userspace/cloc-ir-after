@@ -1,0 +1,14 @@
+#!/bin/bash
+# Runs after the on-demand IR relay stops. Releases the IR link, then checks the RGB webcam path once;
+# the RGB camera HAL wedges only if something opened the webcam while IR was streaming, and a relay
+# restart is the known recovery. Nothing happens if the webcam answers.
+IR_TOOLS=/usr/bin; IR_CSI_ENTITY="Intel IPU6 CSI2 0"; IR_CAPTURE_ENTITY="Intel IPU6 ISYS Capture 0"; IR_FORMAT=Y10_1X10/644x364; IR_LOOPBACK=/dev/video43; RGB_LOOPBACK=/dev/video42
+[ -r /etc/ir-face.conf ] && . /etc/ir-face.conf
+T=$IR_TOOLS
+/usr/local/libexec/cloc-ir-led off 2>/dev/null || true
+for i in 1 2 3 4 5; do sleep 1; $T/media-ctl -l "\"$IR_CSI_ENTITY\":1 -> \"$IR_CAPTURE_ENTITY\":0 [0]" 2>/dev/null && break; done
+if [ -n "$RGB_LOOPBACK" ] && ! timeout 8 gst-launch-1.0 -q v4l2src device=$RGB_LOOPBACK num-buffers=2 ! fakesink >/dev/null 2>&1; then
+  logger -t cloc-ir-after "RGB webcam not answering after IR session; restarting v4l2-relayd"
+  systemctl restart v4l2-relayd.service
+fi
+exit 0
