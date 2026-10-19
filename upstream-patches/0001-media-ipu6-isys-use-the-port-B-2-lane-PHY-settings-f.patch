@@ -1,0 +1,86 @@
+From 1f2076dd42f725cea7f87c0540e2adb8ddf71117 Mon Sep 17 00:00:00 2001
+Message-ID: <1f2076dd42f725cea7f87c0540e2adb8ddf71117.1792446969.git.it@carboniste.com>
+In-Reply-To: <cover.1792446969.git.it@carboniste.com>
+References: <cover.1792446969.git.it@carboniste.com>
+From: Dan Person <it@carboniste.com>
+Date: Mon, 19 Oct 2026 14:55:50 -0700
+Subject: [PATCH 1/2] media: ipu6: isys: use the port B 2-lane PHY settings for
+ 1-lane sensors
+
+On the Lenovo ThinkPad X1 Carbon Gen 11 (Raptor Lake, IPU6EP) the IR
+camera, an OmniVision OV9234 (ACPI OVTI9234), is a single-lane CSI-2
+sensor on driver port 0, which ipu6_isys_driver_port_to_phy_port() maps
+to MCD PHY port B. With x1_port1_config_regs the receiver accepts the
+stream - firmware open/start are acknowledged, the PHY reports ready and
+the CSI-2 error status stays clear - but no frame is ever written and
+every capture ends in a buffer timeout and "stream stop time out".
+
+The Windows IPU6 driver for this machine embeds the same MCD PHY register
+tables. It has no 1-lane table for port B; a 1-lane sensor there is
+programmed with the 2-lane port B set (PPI 3/4/5). The Linux 1-lane port B
+table also writes 0x5d060100 to register 0xaa8, a value that appears in
+no Windows table and breaks the pattern of every other data-lane entry.
+
+Use x2_port1_config_regs for 1-lane sensors on port B and drop the
+now-unused x1_port1_config_regs. With this change the OV9234 streams
+Y10 644x364 at 30 fps, alongside the 2-lane OV2740 on the other port.
+
+Tested on Linux 6.14 and 7.0 with an out-of-tree OV9234 driver.
+
+Signed-off-by: Dan Person <it@carboniste.com>
+---
+ .../media/pci/intel/ipu6/ipu6-isys-mcd-phy.c  | 31 ++++---------------
+ 1 file changed, 6 insertions(+), 25 deletions(-)
+
+diff --git a/drivers/media/pci/intel/ipu6/ipu6-isys-mcd-phy.c b/drivers/media/pci/intel/ipu6/ipu6-isys-mcd-phy.c
+index 71aa500..cae4dc7 100644
+--- a/drivers/media/pci/intel/ipu6/ipu6-isys-mcd-phy.c
++++ b/drivers/media/pci/intel/ipu6/ipu6-isys-mcd-phy.c
+@@ -150,30 +150,6 @@ static const struct phy_reg x1_port0_config_regs[] = {
+ 	{0x00000000, 0x00000000}
+ };
+ 
+-static const struct phy_reg x1_port1_config_regs[] = {
+-	{0x00000c94, 0xc80060fa},
+-	{0x00000c80, 0xcf47abea},
+-	{0x00000c90, 0x10a0840b},
+-	{0x00000ca8, 0xdf04010a},
+-	{0x00000d00, 0x57050060},
+-	{0x00000d10, 0x0030001c},
+-	{0x00000d38, 0x5f004444},
+-	{0x00000d3c, 0x78464204},
+-	{0x00000d48, 0x7821f940},
+-	{0x00000d4c, 0xb2000433},
+-	{0x00000a94, 0xc91030fa},
+-	{0x00000a80, 0x5a166ed0},
+-	{0x00000a90, 0x10a0540b},
+-	{0x00000aa8, 0x5d060100},
+-	{0x00000b00, 0xef053460},
+-	{0x00000b10, 0xa030101c},
+-	{0x00000b38, 0xdf808444},
+-	{0x00000b3c, 0xc8422204},
+-	{0x00000b40, 0x0180088c},
+-	{0x00000b74, 0x00000000},
+-	{0x00000000, 0x00000000}
+-};
+-
+ static const struct phy_reg x1_port2_config_regs[] = {
+ 	{0x00001294, 0x28f000fa},
+ 	{0x00001280, 0x08130cea},
+@@ -475,7 +451,12 @@ static const struct phy_reg x4_port3_config_regs[] = {
+ 
+ static const struct phy_reg *x1_config_regs[4] = {
+ 	x1_port0_config_regs,
+-	x1_port1_config_regs,
++	/*
++	 * A 1-lane sensor on PHY port B does not stream with a dedicated
++	 * 1-lane table; program it with the 2-lane port B set, as the
++	 * Windows driver does.
++	 */
++	x2_port1_config_regs,
+ 	x1_port2_config_regs,
+ 	x1_port3_config_regs
+ };
+-- 
+2.53.0
+

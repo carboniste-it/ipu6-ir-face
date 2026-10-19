@@ -1,0 +1,33 @@
+From cbe3ac6a6423d0055f83a2c6c1360352d0d56cac Mon Sep 17 00:00:00 2001
+Message-ID: <cbe3ac6a6423d0055f83a2c6c1360352d0d56cac.1792446969.git.it@carboniste.com>
+In-Reply-To: <cover.1792446969.git.it@carboniste.com>
+References: <cover.1792446969.git.it@carboniste.com>
+From: Dan Person <it@carboniste.com>
+Date: Mon, 19 Oct 2026 14:55:50 -0700
+Subject: [PATCH 2/2] media: ipu-bridge: Add OmniVision OV9234
+
+Add the OmniVision OV9234 (ACPI OVTI9234), used as the IR camera of the
+Lenovo ThinkPad X1 Carbon Gen 11. It uses one data lane with a 180 MHz
+link frequency.
+
+Signed-off-by: Dan Person <it@carboniste.com>
+---
+ drivers/media/pci/intel/ipu-bridge.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/media/pci/intel/ipu-bridge.c b/drivers/media/pci/intel/ipu-bridge.c
+index 32cc95a..b0bef21 100644
+--- a/drivers/media/pci/intel/ipu-bridge.c
++++ b/drivers/media/pci/intel/ipu-bridge.c
+@@ -93,6 +93,8 @@ static const struct ipu_sensor_config ipu_supported_sensors[] = {
+ 	IPU_SENSOR_CONFIG("OVTI2680", 1, 331200000),
+ 	/* Omnivision OV8856 */
+ 	IPU_SENSOR_CONFIG("OVTI8856", 3, 180000000, 360000000, 720000000),
++	/* Omnivision OV9234 */
++	IPU_SENSOR_CONFIG("OVTI9234", 1, 180000000),
+ 	/* Sony IMX471 */
+ 	IPU_SENSOR_CONFIG("SONY471A", 1, 200000000),
+ 	/* Toshiba T4KA3 */
+-- 
+2.53.0
+
